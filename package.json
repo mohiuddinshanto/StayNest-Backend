@@ -1,0 +1,17 @@
+{
+  "name": "staynest-backend",
+  "version": "1.0.0",
+  "description": "StayNest rental property API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "seed": "node seed.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "mongodb": "^7.5.0"
+  }
+}
