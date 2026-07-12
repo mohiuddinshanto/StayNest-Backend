@@ -2,8 +2,7 @@
 
 A robust RESTful API for a rental property management platform, built with **Node.js**, **Express**, and **MongoDB**. Handles property listings, authentication, reviews, and more.
 
-🔗 **Live API:** [Add your live link here](https://your-live-link.com)
-🔗 **Frontend:** [Add your frontend link here](https://your-frontend-link.com)
+🔗 **Live URL:** [https://staynest-next.vercel.app](https://staynest-next.vercel.app)
 
 ---
 
