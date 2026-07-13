@@ -57,6 +57,10 @@ export interface PropertyDoc {
   approvalStatus: ApprovalStatus;
   rejectionReason?: string;
   createdAt: string;
+  rentedById?: string;
+  rentedByName?: string;
+  rentedByEmail?: string;
+  rentedAt?: string;
 }
 
 export interface ReviewDoc {
@@ -114,6 +118,10 @@ export interface FormattedProperty {
   approvalStatus: ApprovalStatus;
   rejectionReason: string;
   createdAt: string;
+  rentedById?: string;
+  rentedByName?: string;
+  rentedByEmail?: string;
+  rentedAt?: string;
   reviews?: FormattedReview[];
 }
 

@@ -107,6 +107,10 @@ function formatProperty(doc: PropertyDoc): FormattedProperty {
     approvalStatus: doc.approvalStatus ?? "pending",
     rejectionReason: doc.rejectionReason ?? "",
     createdAt: doc.createdAt,
+    rentedById: doc.rentedById,
+    rentedByName: doc.rentedByName,
+    rentedByEmail: doc.rentedByEmail,
+    rentedAt: doc.rentedAt,
   };
 }
 
@@ -398,6 +402,24 @@ app.get("/my-properties", authenticate, async (req: Request, res: Response): Pro
   }
 });
 
+// GET /my-rentals
+app.get("/my-rentals", authenticate, async (req: Request, res: Response): Promise<void> => {
+  const user = (req as AuthRequest).user;
+  try {
+    const db = getDB();
+    const properties = await db
+      .collection<PropertyDoc>("properties")
+      .find({ status: "rented", $or: [{ rentedById: user.id }, { rentedByEmail: user.email }] })
+      .sort({ rentedAt: -1 })
+      .toArray();
+
+    res.json({ success: true, message: "Your rentals fetched successfully", data: properties.map(formatProperty) });
+  } catch (error) {
+    console.error("GET /my-rentals error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch your rentals" });
+  }
+});
+
 // GET /properties/:id
 app.get("/properties/:id", optionalAuthenticate, async (req: Request, res: Response): Promise<void> => {
   const user = (req as OptionalAuthRequest).user;
@@ -611,6 +633,50 @@ app.put("/properties/:id", authenticate, async (req: Request, res: Response): Pr
   } catch (error) {
     console.error("PUT /properties/:id error:", error);
     res.status(500).json({ success: false, message: "Failed to update property" });
+  }
+});
+
+// POST /properties/:id/rent
+app.post("/properties/:id/rent", authenticate, async (req: Request, res: Response): Promise<void> => {
+  const user = (req as AuthRequest).user;
+  try {
+    const db = getDB();
+    let objectId: ObjectId;
+    try {
+      objectId = new ObjectId(req.params.id);
+    } catch {
+      res.status(400).json({ success: false, message: "Invalid property ID" });
+      return;
+    }
+
+    const property = await db.collection<PropertyDoc>("properties").findOne({ _id: objectId });
+    if (!property) {
+      res.status(404).json({ success: false, message: "Property not found" });
+      return;
+    }
+    if (property.approvalStatus !== "approved" || property.status !== "available") {
+      res.status(400).json({ success: false, message: "This property is not available to rent" });
+      return;
+    }
+    if (isPropertyOwner(property, user)) {
+      res.status(400).json({ success: false, message: "You cannot rent your own property" });
+      return;
+    }
+
+    const result = await db.collection("properties").updateOne(
+      { _id: objectId, status: "available", approvalStatus: "approved" },
+      { $set: { status: "rented", rentedById: user.id, rentedByName: user.name, rentedByEmail: user.email, rentedAt: new Date().toISOString() } }
+    );
+    if (result.modifiedCount === 0) {
+      res.status(409).json({ success: false, message: "This property was just rented by someone else" });
+      return;
+    }
+
+    const updated = await db.collection<PropertyDoc>("properties").findOne({ _id: objectId });
+    res.json({ success: true, message: "Property rented successfully", data: formatProperty(updated!) });
+  } catch (error) {
+    console.error("POST /properties/:id/rent error:", error);
+    res.status(500).json({ success: false, message: "Failed to rent property" });
   }
 });
 
