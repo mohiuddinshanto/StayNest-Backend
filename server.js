@@ -82,6 +82,7 @@ async function authenticate(req, res, next) {
       name: user.name,
       email: user.email,
       image: user.image,
+      role: user.role || "user", // Role added for authorization
     };
     next();
   } catch (error) {
@@ -90,6 +91,13 @@ async function authenticate(req, res, next) {
   }
 }
 
+// Middleware for Admin check
+const requireAdmin = async (req, res, next) => {
+  if (req.user.role !== "admin") {
+    return res.status(403).json({ success: false, message: "Admin access required" });
+  }
+  next();
+};
 
 function formatProperty(doc) {
   if (!doc) return null;
@@ -117,6 +125,8 @@ function formatProperty(doc) {
     available: doc.available,
     status: doc.status,
     featured: doc.featured,
+    approvalStatus: doc.approvalStatus || "pending", // New field
+    rejectionReason: doc.rejectionReason || "",      // New field
     createdAt: doc.createdAt,
   };
 }
@@ -146,7 +156,7 @@ function buildSort(sort) {
   }
 }
 
-// GET /properties — search, filter, sort, pagination
+// GET /properties — search, filter, sort, pagination (Public - only shows approved)
 app.get("/properties", async (req, res) => {
   try {
     const db = getDB();
@@ -164,7 +174,7 @@ app.get("/properties", async (req, res) => {
       city,
     } = req.query;
 
-    const filter = {};
+    const filter = { approvalStatus: "approved" }; // Only show approved properties
 
     if (q) {
       const regex = new RegExp(q, "i");
@@ -180,7 +190,7 @@ app.get("/properties", async (req, res) => {
     if (city) filter.city = new RegExp(city, "i");
     if (featured === "true") filter.featured = true;
     if (ownerId) {
-      filter.ownerId = ownerId; // Owner ID can be a string from Better Auth
+      filter.ownerId = ownerId;
     }
 
     if (minPrice || maxPrice) {
@@ -227,6 +237,25 @@ app.get("/properties", async (req, res) => {
   }
 });
 
+// GET /my-properties - Get user's own properties (including pending/rejected)
+app.get("/my-properties", authenticate, async (req, res) => {
+  try {
+    const db = getDB();
+    const properties = await db.collection("properties").find({
+      $or: [{ ownerId: req.user.id }, { ownerEmail: req.user.email }]
+    }).toArray();
+    
+    res.json({ 
+      success: true, 
+      message: "Your properties fetched successfully",
+      data: properties.map(formatProperty) 
+    });
+  } catch (error) {
+    console.error("GET /my-properties error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch your properties" });
+  }
+});
+
 // GET /properties/:id
 app.get("/properties/:id", async (req, res) => {
   try {
@@ -243,6 +272,33 @@ app.get("/properties/:id", async (req, res) => {
 
     if (!property) {
       return res.status(404).json({ success: false, message: "Property not found" });
+    }
+
+    // Check if property is approved OR user is the owner
+    if (property.approvalStatus !== "approved") {
+      // Check if user is authenticated and is the owner
+      const token = getSessionToken(req);
+      let isOwner = false;
+      if (token) {
+        try {
+          const session = await db.collection("session").findOne({ token });
+          if (session) {
+            const user = await db.collection("user").findOne({ id: session.userId });
+            if (user) {
+              isOwner = user.id === property.ownerId || user.email === property.ownerEmail;
+            }
+          }
+        } catch (e) {
+          // If any error in checking ownership, just treat as not owner
+        }
+      }
+      
+      if (!isOwner) {
+        return res.status(403).json({ 
+          success: false, 
+          message: "This property is not approved yet" 
+        });
+      }
     }
 
     const reviews = await db
@@ -302,6 +358,14 @@ function validateProperty(body) {
 // POST /properties
 app.post("/properties", authenticate, async (req, res) => {
   try {
+    // Role check: Only owners or admins can list properties
+    if (req.user.role === "user") {
+      return res.status(403).json({ 
+        success: false, 
+        message: "Only owners or admins can list properties. Please upgrade your account." 
+      });
+    }
+
     const errors = validateProperty(req.body);
     if (errors.length > 0) {
       return res.status(400).json({ success: false, message: "Validation failed: " + errors.join("; ") });
@@ -344,7 +408,7 @@ app.post("/properties", authenticate, async (req, res) => {
       amenities: amenities || [],
       rating: 0,
       reviewCount: 0,
-      ownerId: req.user.id, // Authenticated user ID from Better Auth
+      ownerId: req.user.id,
       ownerName: req.user.name || "Host",
       ownerImage: req.user.image || "",
       ownerPhone: ownerPhone,
@@ -352,6 +416,9 @@ app.post("/properties", authenticate, async (req, res) => {
       available: available || new Date().toISOString().split("T")[0],
       status,
       featured,
+      // Admin users get auto-approved, others need approval
+      approvalStatus: req.user.role === "admin" ? "approved" : "pending",
+      rejectionReason: "",
       createdAt: new Date().toISOString().split("T")[0],
     };
 
@@ -359,7 +426,9 @@ app.post("/properties", authenticate, async (req, res) => {
 
     res.status(201).json({
       success: true,
-      message: "Property created successfully",
+      message: req.user.role === "admin" 
+        ? "Property created and approved successfully" 
+        : "Property created successfully. It will be visible after admin approval.",
       data: formatProperty({ _id: result.insertedId, ...property }),
     });
   } catch (error) {
@@ -442,6 +511,8 @@ app.put("/properties/:id", authenticate, async (req, res) => {
       status: status || existing.status,
       featured: featured ?? existing.featured,
       ownerPhone: ownerPhone ?? existing.ownerPhone,
+      // When updating, reset approval status to pending unless user is admin
+      approvalStatus: req.user.role === "admin" ? existing.approvalStatus : "pending",
     };
 
     await db.collection("properties").updateOne({ _id: objectId }, { $set: updates });
@@ -450,7 +521,9 @@ app.put("/properties/:id", authenticate, async (req, res) => {
 
     res.json({
       success: true,
-      message: "Property updated successfully",
+      message: req.user.role === "admin" 
+        ? "Property updated successfully" 
+        : "Property updated successfully. It will be reviewed again by admin.",
       data: formatProperty(updated),
     });
   } catch (error) {
@@ -524,6 +597,253 @@ app.get("/reviews/:propertyId", async (req, res) => {
   }
 });
 
+// PATCH /users/me/become-owner
+app.patch("/users/me/become-owner", authenticate, async (req, res) => {
+  try {
+    const db = getDB();
+    const userId = req.user.id;
+
+    // Find user in 'user' or 'users' collection
+    let user = await db.collection("user").findOne({ id: userId });
+    let collectionName = "user";
+    if (!user) {
+      user = await db.collection("users").findOne({ id: userId });
+      collectionName = "users";
+    }
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    // Check if role is already owner or admin
+    if (user.role === "owner" || user.role === "admin") {
+      return res.json({ success: true, role: user.role });
+    }
+
+    // Update role to owner
+    await db.collection(collectionName).updateOne(
+      { id: userId },
+      { $set: { role: "owner" } }
+    );
+
+    res.json({ success: true, role: "owner" });
+  } catch (error) {
+    console.error("PATCH /users/me/become-owner error:", error);
+    res.status(500).json({ success: false, message: "Failed to update role" });
+  }
+});
+
+// ADMIN ENDPOINTS FOR PROPERTY APPROVAL
+
+// GET /admin/properties/pending - Get all pending properties (Admin only)
+app.get("/admin/properties/pending", authenticate, requireAdmin, async (req, res) => {
+  try {
+    const db = getDB();
+    const { page = "1", limit = "10" } = req.query;
+    
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(50, Math.max(1, parseInt(limit, 10) || 10));
+    const skip = (pageNum - 1) * limitNum;
+
+    const filter = { approvalStatus: "pending" };
+    const total = await db.collection("properties").countDocuments(filter);
+    const properties = await db.collection("properties")
+      .find(filter)
+      .sort({ createdAt: 1 })
+      .skip(skip)
+      .limit(limitNum)
+      .toArray();
+
+    res.json({
+      success: true,
+      data: properties.map(formatProperty),
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum),
+      },
+    });
+  } catch (error) {
+    console.error("GET /admin/properties/pending error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch pending properties" });
+  }
+});
+
+// GET /admin/properties/all - Get all properties (Admin only)
+app.get("/admin/properties/all", authenticate, requireAdmin, async (req, res) => {
+  try {
+    const db = getDB();
+    const { page = "1", limit = "20", status } = req.query;
+    
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(50, Math.max(1, parseInt(limit, 10) || 20));
+    const skip = (pageNum - 1) * limitNum;
+
+    const filter = {};
+    if (status && status !== "all") {
+      filter.approvalStatus = status;
+    }
+
+    const total = await db.collection("properties").countDocuments(filter);
+    const properties = await db.collection("properties")
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum)
+      .toArray();
+
+    res.json({
+      success: true,
+      data: properties.map(formatProperty),
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum),
+      },
+    });
+  } catch (error) {
+    console.error("GET /admin/properties/all error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch properties" });
+  }
+});
+
+// PATCH /admin/properties/:id/approve
+app.patch("/admin/properties/:id/approve", authenticate, requireAdmin, async (req, res) => {
+  try {
+    const db = getDB();
+    let objectId;
+
+    try {
+      objectId = new ObjectId(req.params.id);
+    } catch {
+      return res.status(400).json({ success: false, message: "Invalid property ID" });
+    }
+
+    const property = await db.collection("properties").findOne({ _id: objectId });
+    if (!property) {
+      return res.status(404).json({ success: false, message: "Property not found" });
+    }
+
+    await db.collection("properties").updateOne(
+      { _id: objectId },
+      { 
+        $set: { 
+          approvalStatus: "approved",
+          rejectionReason: ""
+        } 
+      }
+    );
+
+    res.json({ 
+      success: true, 
+      message: "Property approved successfully",
+      data: formatProperty({ ...property, approvalStatus: "approved" })
+    });
+  } catch (error) {
+    console.error("PATCH /admin/properties/:id/approve error:", error);
+    res.status(500).json({ success: false, message: "Failed to approve property" });
+  }
+});
+
+// PATCH /admin/properties/:id/reject
+app.patch("/admin/properties/:id/reject", authenticate, requireAdmin, async (req, res) => {
+  try {
+    const db = getDB();
+    let objectId;
+
+    try {
+      objectId = new ObjectId(req.params.id);
+    } catch {
+      return res.status(400).json({ success: false, message: "Invalid property ID" });
+    }
+
+    const { reason } = req.body;
+    if (!reason || typeof reason !== "string" || !reason.trim()) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Rejection reason is required" 
+      });
+    }
+
+    const property = await db.collection("properties").findOne({ _id: objectId });
+    if (!property) {
+      return res.status(404).json({ success: false, message: "Property not found" });
+    }
+
+    await db.collection("properties").updateOne(
+      { _id: objectId },
+      { 
+        $set: { 
+          approvalStatus: "rejected",
+          rejectionReason: reason.trim()
+        } 
+      }
+    );
+
+    res.json({ 
+      success: true, 
+      message: "Property rejected successfully",
+      data: formatProperty({ ...property, approvalStatus: "rejected", rejectionReason: reason.trim() })
+    });
+  } catch (error) {
+    console.error("PATCH /admin/properties/:id/reject error:", error);
+    res.status(500).json({ success: false, message: "Failed to reject property" });
+  }
+});
+
+// PATCH /admin/properties/:id/status - Change approval status (Admin only)
+app.patch("/admin/properties/:id/status", authenticate, requireAdmin, async (req, res) => {
+  try {
+    const db = getDB();
+    let objectId;
+
+    try {
+      objectId = new ObjectId(req.params.id);
+    } catch {
+      return res.status(400).json({ success: false, message: "Invalid property ID" });
+    }
+
+    const { approvalStatus, rejectionReason } = req.body;
+    
+    if (!approvalStatus || !["pending", "approved", "rejected"].includes(approvalStatus)) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Invalid approval status. Must be 'pending', 'approved', or 'rejected'" 
+      });
+    }
+
+    const property = await db.collection("properties").findOne({ _id: objectId });
+    if (!property) {
+      return res.status(404).json({ success: false, message: "Property not found" });
+    }
+
+    const updateData = { approvalStatus };
+    if (approvalStatus === "rejected") {
+      updateData.rejectionReason = rejectionReason || "No reason provided";
+    } else if (approvalStatus === "approved") {
+      updateData.rejectionReason = "";
+    }
+
+    await db.collection("properties").updateOne(
+      { _id: objectId },
+      { $set: updateData }
+    );
+
+    const updated = await db.collection("properties").findOne({ _id: objectId });
+
+    res.json({ 
+      success: true, 
+      message: `Property status updated to ${approvalStatus}`,
+      data: formatProperty(updated)
+    });
+  } catch (error) {
+    console.error("PATCH /admin/properties/:id/status error:", error);
+    res.status(500).json({ success: false, message: "Failed to update property status" });
+  }
+});
+
 // Request body validator for reviews
 function validateReview(body) {
   const errors = [];
@@ -560,6 +880,14 @@ app.post("/reviews", authenticate, async (req, res) => {
     const property = await db.collection("properties").findOne({ _id: objectId });
     if (!property) {
       return res.status(404).json({ success: false, message: "Property not found" });
+    }
+
+    // Only allow reviews on approved properties
+    if (property.approvalStatus !== "approved") {
+      return res.status(403).json({ 
+        success: false, 
+        message: "Cannot review property that is not approved" 
+      });
     }
 
     const review = {
@@ -599,6 +927,74 @@ app.post("/reviews", authenticate, async (req, res) => {
     res.status(500).json({ success: false, message: "Failed to add review" });
   }
 });
+
+// --- নতুন এন্ডপয়েন্টসমূহ ---
+
+// 1. GET /admin/properties — Admin: সব প্রপার্টি দেখা (Pagination সহ)
+app.get("/admin/properties", authenticate, requireAdmin, async (req, res) => {
+  try {
+    const db = getDB();
+    const { status, page = "1", limit = "20" } = req.query;
+    
+    const filter = {};
+    if (status && ["pending", "approved", "rejected"].includes(status)) {
+      filter.approvalStatus = status;
+    }
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(50, Math.max(1, parseInt(limit, 10) || 20));
+    const skip = (pageNum - 1) * limitNum;
+
+    const total = await db.collection("properties").countDocuments(filter);
+    const properties = await db.collection("properties")
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum)
+      .toArray();
+
+    res.json({
+      success: true,
+      data: properties.map(formatProperty),
+      pagination: { page: pageNum, limit: limitNum, total, totalPages: Math.ceil(total / limitNum) }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to fetch admin properties" });
+  }
+});
+
+// 2. DELETE /admin/properties/:id — Admin: প্রপার্টি + রিভিউ + ইনকয়্যারিস ডিলিট
+app.delete("/admin/properties/:id", authenticate, requireAdmin, async (req, res) => {
+  try {
+    const db = getDB();
+    const objectId = new ObjectId(req.params.id);
+
+    await db.collection("properties").deleteOne({ _id: objectId });
+    await db.collection("reviews").deleteMany({ propertyId: objectId });
+    // যদি ইনকয়্যারিস বা অন্য কিছু থাকে, তবে এখানে ডিলিট করতে পারেন
+    
+    res.json({ success: true, message: "Property and associated data deleted by Admin" });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to delete property" });
+  }
+});
+
+// 3. GET /admin/users — Admin: সকল ইউজারের তালিকা
+app.get("/admin/users", authenticate, requireAdmin, async (req, res) => {
+  try {
+    const db = getDB();
+    const users = await db.collection("user").find({}, { 
+      projection: { id: 1, name: 1, email: 1, role: 1, createdAt: 1 } 
+    }).toArray();
+    
+    res.json({ success: true, data: users });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to fetch users" });
+  }
+});
+
+
+
 
 // Health check
 app.get("/", (req, res) => {
