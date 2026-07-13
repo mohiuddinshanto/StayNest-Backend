@@ -82,12 +82,69 @@ async function authenticate(req, res, next) {
       name: user.name,
       email: user.email,
       image: user.image,
-      role: user.role || "user", // Role added for authorization
+      role: user.role || "user",
     };
     next();
   } catch (error) {
     console.error("Backend auth middleware error:", error);
     res.status(500).json({ success: false, message: "Internal server error during authentication" });
+  }
+}
+
+// Optional authentication middleware — verifies token if present, but never blocks the request.
+// If there's no token, or it's invalid/expired/no matching user, req.user is just set to null
+// and the request continues (unlike `authenticate`, which returns 401 in those cases).
+async function optionalAuthenticate(req, res, next) {
+  try {
+    const token = getSessionToken(req);
+    if (!token) {
+      req.user = null;
+      return next();
+    }
+
+    const db = getDB();
+
+    const session = await db.collection("session").findOne({ token });
+    if (!session) {
+      req.user = null;
+      return next();
+    }
+
+    if (new Date() > new Date(session.expiresAt)) {
+      req.user = null;
+      return next();
+    }
+
+    const orConditions = [{ id: session.userId }];
+    try {
+      orConditions.push({ _id: new ObjectId(session.userId) });
+    } catch (e) {
+      orConditions.push({ _id: session.userId });
+    }
+
+    let user = await db.collection("user").findOne({ $or: orConditions });
+    if (!user) {
+      user = await db.collection("users").findOne({ $or: orConditions });
+    }
+
+    if (!user) {
+      req.user = null;
+      return next();
+    }
+
+    req.user = {
+      id: user.id || user._id.toString(),
+      name: user.name,
+      email: user.email,
+      image: user.image,
+      role: user.role || "user",
+    };
+    next();
+  } catch (error) {
+    console.error("Backend optionalAuthenticate error:", error);
+    // Fail open (as a guest), never block the request due to an auth-check error
+    req.user = null;
+    next();
   }
 }
 
@@ -125,8 +182,8 @@ function formatProperty(doc) {
     available: doc.available,
     status: doc.status,
     featured: doc.featured,
-    approvalStatus: doc.approvalStatus || "pending", // New field
-    rejectionReason: doc.rejectionReason || "",      // New field
+    approvalStatus: doc.approvalStatus || "pending",
+    rejectionReason: doc.rejectionReason || "",
     createdAt: doc.createdAt,
   };
 }
@@ -140,6 +197,25 @@ function formatReview(doc) {
     rating: doc.rating,
     comment: doc.comment,
     date: doc.date,
+  };
+}
+
+// Helper for formatting inquiries
+function formatInquiry(doc) {
+  if (!doc) return null;
+  return {
+    id: doc._id.toString(),
+    propertyId: doc.propertyId.toString(),
+    propertyTitle: doc.propertyTitle,
+    ownerId: doc.ownerId?.toString(),
+    senderId: doc.senderId?.toString(),
+    senderName: doc.senderName,
+    senderEmail: doc.senderEmail,
+    type: doc.type,
+    message: doc.message,
+    preferredDate: doc.preferredDate || null,
+    status: doc.status || "unread",
+    createdAt: doc.createdAt,
   };
 }
 
@@ -174,7 +250,7 @@ app.get("/properties", async (req, res) => {
       city,
     } = req.query;
 
-    const filter = { approvalStatus: "approved" }; // Only show approved properties
+    const filter = { approvalStatus: "approved" };
 
     if (q) {
       const regex = new RegExp(q, "i");
@@ -257,7 +333,7 @@ app.get("/my-properties", authenticate, async (req, res) => {
 });
 
 // GET /properties/:id
-app.get("/properties/:id", async (req, res) => {
+app.get("/properties/:id", optionalAuthenticate, async (req, res) => {
   try {
     const db = getDB();
     let objectId;
@@ -274,29 +350,18 @@ app.get("/properties/:id", async (req, res) => {
       return res.status(404).json({ success: false, message: "Property not found" });
     }
 
-    // Check if property is approved OR user is the owner
+    // Non-approved properties are only visible to the owner or an admin.
     if (property.approvalStatus !== "approved") {
-      // Check if user is authenticated and is the owner
-      const token = getSessionToken(req);
-      let isOwner = false;
-      if (token) {
-        try {
-          const session = await db.collection("session").findOne({ token });
-          if (session) {
-            const user = await db.collection("user").findOne({ id: session.userId });
-            if (user) {
-              isOwner = user.id === property.ownerId || user.email === property.ownerEmail;
-            }
-          }
-        } catch (e) {
-          // If any error in checking ownership, just treat as not owner
-        }
-      }
-      
-      if (!isOwner) {
-        return res.status(403).json({ 
-          success: false, 
-          message: "This property is not approved yet" 
+      const user = req.user; // null for guests (optionalAuthenticate never blocks)
+      const isOwner =
+        !!user &&
+        (user.id === property.ownerId || user.email === property.ownerEmail);
+      const isAdmin = !!user && user.role === "admin";
+
+      if (!isOwner && !isAdmin) {
+        return res.status(403).json({
+          success: false,
+          message: "This property is not approved yet",
         });
       }
     }
@@ -358,7 +423,6 @@ function validateProperty(body) {
 // POST /properties
 app.post("/properties", authenticate, async (req, res) => {
   try {
-    // Role check: Only owners or admins can list properties
     if (req.user.role === "user") {
       return res.status(403).json({ 
         success: false, 
@@ -416,7 +480,6 @@ app.post("/properties", authenticate, async (req, res) => {
       available: available || new Date().toISOString().split("T")[0],
       status,
       featured,
-      // Admin users get auto-approved, others need approval
       approvalStatus: req.user.role === "admin" ? "approved" : "pending",
       rejectionReason: "",
       createdAt: new Date().toISOString().split("T")[0],
@@ -511,7 +574,6 @@ app.put("/properties/:id", authenticate, async (req, res) => {
       status: status || existing.status,
       featured: featured ?? existing.featured,
       ownerPhone: ownerPhone ?? existing.ownerPhone,
-      // When updating, reset approval status to pending unless user is admin
       approvalStatus: req.user.role === "admin" ? existing.approvalStatus : "pending",
     };
 
@@ -560,6 +622,8 @@ app.delete("/properties/:id", authenticate, async (req, res) => {
     }
 
     await db.collection("reviews").deleteMany({ propertyId: objectId });
+    // Delete associated inquiries
+    await db.collection("inquiries").deleteMany({ propertyId: objectId });
 
     res.json({ success: true, message: "Property deleted successfully" });
   } catch (error) {
@@ -603,11 +667,19 @@ app.patch("/users/me/become-owner", authenticate, async (req, res) => {
     const db = getDB();
     const userId = req.user.id;
 
-    // Find user in 'user' or 'users' collection
-    let user = await db.collection("user").findOne({ id: userId });
+    // Build the same dual id/_id lookup conditions used in the authenticate middleware,
+    // since better-auth users may be keyed by a string `id` field or a Mongo ObjectId `_id`.
+    const orConditions = [{ id: userId }];
+    try {
+      orConditions.push({ _id: new ObjectId(userId) });
+    } catch (e) {
+      orConditions.push({ _id: userId });
+    }
+
+    let user = await db.collection("user").findOne({ $or: orConditions });
     let collectionName = "user";
     if (!user) {
-      user = await db.collection("users").findOne({ id: userId });
+      user = await db.collection("users").findOne({ $or: orConditions });
       collectionName = "users";
     }
 
@@ -615,14 +687,12 @@ app.patch("/users/me/become-owner", authenticate, async (req, res) => {
       return res.status(404).json({ success: false, message: "User not found" });
     }
 
-    // Check if role is already owner or admin
     if (user.role === "owner" || user.role === "admin") {
       return res.json({ success: true, role: user.role });
     }
 
-    // Update role to owner
     await db.collection(collectionName).updateOne(
-      { id: userId },
+      { _id: user._id },
       { $set: { role: "owner" } }
     );
 
@@ -633,7 +703,575 @@ app.patch("/users/me/become-owner", authenticate, async (req, res) => {
   }
 });
 
+// ============================================
+// INQUIRY ENDPOINTS
+// ============================================
+
+// 1. POST /inquiries — Send a new inquiry
+app.post("/inquiries", authenticate, async (req, res) => {
+  try {
+    const db = getDB();
+    const { propertyId, type, message, preferredDate } = req.body;
+
+    if (!propertyId || !type || !message) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Missing required fields: propertyId, type, and message are required" 
+      });
+    }
+
+    let objectId;
+    try {
+      objectId = new ObjectId(propertyId);
+    } catch {
+      return res.status(400).json({ success: false, message: "Invalid property ID" });
+    }
+
+    const property = await db.collection("properties").findOne({ _id: objectId });
+    if (!property) {
+      return res.status(404).json({ success: false, message: "Property not found" });
+    }
+
+    // Owner cannot send inquiry for their own property
+    if (property.ownerId === req.user.id || property.ownerEmail === req.user.email) {
+      return res.status(403).json({ 
+        success: false, 
+        message: "You cannot send an inquiry for your own property" 
+      });
+    }
+
+    // Only allow inquiries on approved properties
+    if (property.approvalStatus !== "approved") {
+      return res.status(403).json({ 
+        success: false, 
+        message: "Cannot send inquiry for unapproved property" 
+      });
+    }
+
+    const inquiry = {
+      propertyId: property._id,
+      propertyTitle: property.title,
+      ownerId: property.ownerId,
+      senderId: req.user.id,
+      senderName: req.user.name || "Anonymous",
+      senderEmail: req.user.email,
+      type: type, // "message" or "schedule_viewing"
+      message: message.trim(),
+      preferredDate: preferredDate || null,
+      status: "unread",
+      createdAt: new Date().toISOString(),
+    };
+
+    const result = await db.collection("inquiries").insertOne(inquiry);
+    
+    res.status(201).json({ 
+      success: true, 
+      message: "Inquiry sent successfully", 
+      data: formatInquiry({ _id: result.insertedId, ...inquiry }) 
+    });
+  } catch (error) {
+    console.error("POST /inquiries error:", error);
+    res.status(500).json({ success: false, message: "Failed to send inquiry" });
+  }
+});
+
+// 2. GET /inquiries/received — Get inquiries received by the owner
+app.get("/inquiries/received", authenticate, async (req, res) => {
+  try {
+    const db = getDB();
+    const { page = "1", limit = "20", status } = req.query;
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(50, Math.max(1, parseInt(limit, 10) || 20));
+    const skip = (pageNum - 1) * limitNum;
+
+    const filter = { ownerId: req.user.id };
+    if (status && ["unread", "read"].includes(status)) {
+      filter.status = status;
+    }
+
+    const total = await db.collection("inquiries").countDocuments(filter);
+    const inquiries = await db.collection("inquiries")
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum)
+      .toArray();
+
+    res.json({
+      success: true,
+      message: "Received inquiries fetched successfully",
+      data: inquiries.map(formatInquiry),
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum),
+      },
+    });
+  } catch (error) {
+    console.error("GET /inquiries/received error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch inquiries" });
+  }
+});
+
+// 3. GET /inquiries/sent — Get inquiries sent by the user
+app.get("/inquiries/sent", authenticate, async (req, res) => {
+  try {
+    const db = getDB();
+    const { page = "1", limit = "20" } = req.query;
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(50, Math.max(1, parseInt(limit, 10) || 20));
+    const skip = (pageNum - 1) * limitNum;
+
+    const filter = { senderId: req.user.id };
+    const total = await db.collection("inquiries").countDocuments(filter);
+    const inquiries = await db.collection("inquiries")
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum)
+      .toArray();
+
+    res.json({
+      success: true,
+      message: "Sent inquiries fetched successfully",
+      data: inquiries.map(formatInquiry),
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum),
+      },
+    });
+  } catch (error) {
+    console.error("GET /inquiries/sent error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch inquiries" });
+  }
+});
+
+// 4. GET /inquiries/:id — Get a specific inquiry
+app.get("/inquiries/:id", authenticate, async (req, res) => {
+  try {
+    const db = getDB();
+    let objectId;
+    try {
+      objectId = new ObjectId(req.params.id);
+    } catch {
+      return res.status(400).json({ success: false, message: "Invalid inquiry ID" });
+    }
+
+    const inquiry = await db.collection("inquiries").findOne({ _id: objectId });
+    if (!inquiry) {
+      return res.status(404).json({ success: false, message: "Inquiry not found" });
+    }
+
+    // Check if user is sender or receiver (owner)
+    if (inquiry.senderId !== req.user.id && inquiry.ownerId !== req.user.id) {
+      return res.status(403).json({ success: false, message: "Unauthorized" });
+    }
+
+    res.json({ success: true, data: formatInquiry(inquiry) });
+  } catch (error) {
+    console.error("GET /inquiries/:id error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch inquiry" });
+  }
+});
+
+// 5. PATCH /inquiries/:id/read — Mark inquiry as read (Owner only)
+app.patch("/inquiries/:id/read", authenticate, async (req, res) => {
+  try {
+    const db = getDB();
+    let objectId;
+    try {
+      objectId = new ObjectId(req.params.id);
+    } catch {
+      return res.status(400).json({ success: false, message: "Invalid inquiry ID" });
+    }
+
+    const inquiry = await db.collection("inquiries").findOne({ _id: objectId });
+    if (!inquiry) {
+      return res.status(404).json({ success: false, message: "Inquiry not found" });
+    }
+
+    // Only the owner can mark as read
+    if (inquiry.ownerId !== req.user.id) {
+      return res.status(403).json({ success: false, message: "Unauthorized" });
+    }
+
+    await db.collection("inquiries").updateOne(
+      { _id: objectId },
+      { $set: { status: "read" } }
+    );
+
+    res.json({ success: true, message: "Inquiry marked as read" });
+  } catch (error) {
+    console.error("PATCH /inquiries/:id/read error:", error);
+    res.status(500).json({ success: false, message: "Failed to update status" });
+  }
+});
+
+// 6. DELETE /inquiries/:id — Delete an inquiry (Sender only)
+app.delete("/inquiries/:id", authenticate, async (req, res) => {
+  try {
+    const db = getDB();
+    let objectId;
+    try {
+      objectId = new ObjectId(req.params.id);
+    } catch {
+      return res.status(400).json({ success: false, message: "Invalid inquiry ID" });
+    }
+
+    const inquiry = await db.collection("inquiries").findOne({ _id: objectId });
+    if (!inquiry) {
+      return res.status(404).json({ success: false, message: "Inquiry not found" });
+    }
+
+    // Only the sender can delete the inquiry
+    if (inquiry.senderId !== req.user.id) {
+      return res.status(403).json({ success: false, message: "Unauthorized" });
+    }
+
+    await db.collection("inquiries").deleteOne({ _id: objectId });
+
+    res.json({ success: true, message: "Inquiry deleted successfully" });
+  } catch (error) {
+    console.error("DELETE /inquiries/:id error:", error);
+    res.status(500).json({ success: false, message: "Failed to delete inquiry" });
+  }
+});
+
+// 7. GET /inquiries/property/:propertyId — Get inquiries for a specific property (Owner only)
+app.get("/inquiries/property/:propertyId", authenticate, async (req, res) => {
+  try {
+    const db = getDB();
+    let propertyObjectId;
+    try {
+      propertyObjectId = new ObjectId(req.params.propertyId);
+    } catch {
+      return res.status(400).json({ success: false, message: "Invalid property ID" });
+    }
+
+    // Check if property exists and user is the owner
+    const property = await db.collection("properties").findOne({ _id: propertyObjectId });
+    if (!property) {
+      return res.status(404).json({ success: false, message: "Property not found" });
+    }
+
+    if (!isPropertyOwner(property, req.user)) {
+      return res.status(403).json({ success: false, message: "You don't own this property" });
+    }
+
+    const inquiries = await db.collection("inquiries")
+      .find({ propertyId: propertyObjectId })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json({
+      success: true,
+      message: "Property inquiries fetched successfully",
+      data: inquiries.map(formatInquiry),
+    });
+  } catch (error) {
+    console.error("GET /inquiries/property/:propertyId error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch property inquiries" });
+  }
+});
+
+// 8. GET /inquiries/unread/count — Get unread inquiry count (Owner only)
+app.get("/inquiries/unread/count", authenticate, async (req, res) => {
+  try {
+    const db = getDB();
+    const count = await db.collection("inquiries").countDocuments({
+      ownerId: req.user.id,
+      status: "unread"
+    });
+
+    res.json({ success: true, unreadCount: count });
+  } catch (error) {
+    console.error("GET /inquiries/unread/count error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch unread count" });
+  }
+});
+
+// ============================================
+// ANALYTICS ENDPOINTS
+// ============================================
+
+// 1. GET /owner/analytics — Owner এর নিজের প্রপার্টির হিসাব
+app.get("/owner/analytics", authenticate, async (req, res) => {
+  try {
+    const db = getDB();
+    const ownerId = req.user.id;
+
+    // Aggregation pipeline for owner stats
+    const stats = await db.collection("properties").aggregate([
+      { $match: { ownerId: ownerId } },
+      {
+        $group: {
+          _id: null,
+          totalProperties: { $sum: 1 },
+          pendingCount: { $sum: { $cond: [{ $eq: ["$approvalStatus", "pending"] }, 1, 0] } },
+          approvedCount: { $sum: { $cond: [{ $eq: ["$approvalStatus", "approved"] }, 1, 0] } },
+          rejectedCount: { $sum: { $cond: [{ $eq: ["$approvalStatus", "rejected"] }, 1, 0] } },
+          totalRevenue: { $sum: { $cond: [{ $eq: ["$status", "rented"] }, "$rent", 0] } },
+          totalReviews: { $sum: "$reviewCount" }
+        }
+      }
+    ]).toArray();
+
+    // Get Inquiry Count separately
+    const totalInquiries = await db.collection("inquiries").countDocuments({ ownerId: ownerId });
+
+    // Get property status breakdown
+    const statusBreakdown = await db.collection("properties").aggregate([
+      { $match: { ownerId: ownerId } },
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 }
+        }
+      }
+    ]).toArray();
+
+    // Format status breakdown
+    const statusStats = {};
+    statusBreakdown.forEach(item => {
+      statusStats[item._id || "unknown"] = item.count;
+    });
+
+    res.json({
+      success: true,
+      data: stats.length > 0 ? { 
+        ...stats[0], 
+        totalInquiries, 
+        statusStats,
+        _id: undefined 
+      } : {
+        totalProperties: 0, 
+        pendingCount: 0, 
+        approvedCount: 0, 
+        rejectedCount: 0, 
+        totalRevenue: 0, 
+        totalReviews: 0, 
+        totalInquiries,
+        statusStats: {}
+      }
+    });
+  } catch (error) {
+    console.error("GET /owner/analytics error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch owner analytics" });
+  }
+});
+
+// 2. GET /admin/analytics — Admin এর প্ল্যাটফর্ম ওয়াইড হিসাব
+app.get("/admin/analytics", authenticate, requireAdmin, async (req, res) => {
+  try {
+    const db = getDB();
+
+    // Grouping by Owner
+    const ownerAnalytics = await db.collection("properties").aggregate([
+      {
+        $group: {
+          _id: "$ownerId",
+          ownerName: { $first: "$ownerName" },
+          ownerEmail: { $first: "$ownerEmail" },
+          propertyCount: { $sum: 1 },
+          approvedCount: { $sum: { $cond: [{ $eq: ["$approvalStatus", "approved"] }, 1, 0] } },
+          pendingCount: { $sum: { $cond: [{ $eq: ["$approvalStatus", "pending"] }, 1, 0] } },
+          rejectedCount: { $sum: { $cond: [{ $eq: ["$approvalStatus", "rejected"] }, 1, 0] } },
+          totalRevenue: { $sum: { $cond: [{ $eq: ["$status", "rented"] }, "$rent", 0] } },
+          totalReviews: { $sum: "$reviewCount" }
+        }
+      },
+      {
+        $lookup: {
+          from: "inquiries",
+          localField: "_id",
+          foreignField: "ownerId",
+          as: "inquiries"
+        }
+      },
+      {
+        $project: {
+          ownerId: "$_id",
+          ownerName: 1,
+          ownerEmail: 1,
+          propertyCount: 1,
+          approvedCount: 1,
+          pendingCount: 1,
+          rejectedCount: 1,
+          totalRevenue: 1,
+          totalReviews: 1,
+          totalInquiries: { $size: "$inquiries" },
+          _id: 0
+        }
+      },
+      { $sort: { propertyCount: -1 } }
+    ]).toArray();
+
+    // Grand Totals
+    const platformStats = await db.collection("properties").aggregate([
+      {
+        $group: {
+          _id: null,
+          platformTotalRevenue: { $sum: { $cond: [{ $eq: ["$status", "rented"] }, "$rent", 0] } },
+          platformTotalProperties: { $sum: 1 },
+          platformTotalApproved: { $sum: { $cond: [{ $eq: ["$approvalStatus", "approved"] }, 1, 0] } },
+          platformTotalPending: { $sum: { $cond: [{ $eq: ["$approvalStatus", "pending"] }, 1, 0] } },
+          platformTotalRejected: { $sum: { $cond: [{ $eq: ["$approvalStatus", "rejected"] }, 1, 0] } },
+          platformTotalReviews: { $sum: "$reviewCount" }
+        }
+      }
+    ]).toArray();
+
+    // Get property type distribution
+    const typeDistribution = await db.collection("properties").aggregate([
+      { $match: { approvalStatus: "approved" } },
+      {
+        $group: {
+          _id: "$type",
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { count: -1 } }
+    ]).toArray();
+
+    // Get city distribution
+    const cityDistribution = await db.collection("properties").aggregate([
+      { $match: { approvalStatus: "approved" } },
+      {
+        $group: {
+          _id: "$city",
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { count: -1 } },
+      { $limit: 10 }
+    ]).toArray();
+
+    // Get monthly trends (last 12 months)
+    const monthlyTrends = await db.collection("properties").aggregate([
+      {
+        $match: {
+          createdAt: { $exists: true }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            year: { $year: { $dateFromString: { dateString: "$createdAt" } } },
+            month: { $month: { $dateFromString: { dateString: "$createdAt" } } }
+          },
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { "_id.year": -1, "_id.month": -1 } },
+      { $limit: 12 }
+    ]).toArray();
+
+    const totalUsers = await db.collection("user").countDocuments();
+    const totalOwners = await db.collection("user").countDocuments({ role: "owner" });
+    const totalAdmins = await db.collection("user").countDocuments({ role: "admin" });
+    const totalInquiries = await db.collection("inquiries").countDocuments();
+
+    // Format monthly trends
+    const formattedMonthlyTrends = monthlyTrends.map(item => ({
+      month: `${item._id.year}-${String(item._id.month).padStart(2, '0')}`,
+      count: item.count
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        ownerAnalytics,
+        grandTotal: {
+          platformTotalRevenue: platformStats[0]?.platformTotalRevenue || 0,
+          platformTotalProperties: platformStats[0]?.platformTotalProperties || 0,
+          platformTotalApproved: platformStats[0]?.platformTotalApproved || 0,
+          platformTotalPending: platformStats[0]?.platformTotalPending || 0,
+          platformTotalRejected: platformStats[0]?.platformTotalRejected || 0,
+          platformTotalReviews: platformStats[0]?.platformTotalReviews || 0,
+          platformTotalUsers: totalUsers,
+          platformTotalOwners: totalOwners,
+          platformTotalAdmins: totalAdmins,
+          platformTotalInquiries: totalInquiries,
+        },
+        distributions: {
+          typeDistribution,
+          cityDistribution,
+        },
+        monthlyTrends: formattedMonthlyTrends
+      }
+    });
+  } catch (error) {
+    console.error("GET /admin/analytics error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch admin analytics" });
+  }
+});
+
+// 3. GET /owner/analytics/:propertyId — Owner: নির্দিষ্ট প্রপার্টির অ্যানালিটিক্স
+app.get("/owner/analytics/:propertyId", authenticate, async (req, res) => {
+  try {
+    const db = getDB();
+    const propertyId = req.params.propertyId;
+    
+    let objectId;
+    try {
+      objectId = new ObjectId(propertyId);
+    } catch {
+      return res.status(400).json({ success: false, message: "Invalid property ID" });
+    }
+
+    // Check property ownership
+    const property = await db.collection("properties").findOne({ _id: objectId });
+    if (!property) {
+      return res.status(404).json({ success: false, message: "Property not found" });
+    }
+
+    if (!isPropertyOwner(property, req.user)) {
+      return res.status(403).json({ success: false, message: "You don't own this property" });
+    }
+
+    // Get property inquiries
+    const inquiries = await db.collection("inquiries")
+      .find({ propertyId: objectId })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    // Get property reviews
+    const reviews = await db.collection("reviews")
+      .find({ propertyId: objectId })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    // Calculate average rating
+    const avgRating = reviews.length > 0
+      ? reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length
+      : 0;
+
+    res.json({
+      success: true,
+      data: {
+        property: formatProperty(property),
+        totalInquiries: inquiries.length,
+        unreadInquiries: inquiries.filter(i => i.status === "unread").length,
+        totalReviews: reviews.length,
+        averageRating: Math.round(avgRating * 10) / 10,
+        inquiries: inquiries.map(formatInquiry),
+        reviews: reviews.map(formatReview)
+      }
+    });
+  } catch (error) {
+    console.error("GET /owner/analytics/:propertyId error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch property analytics" });
+  }
+});
+
+// ============================================
 // ADMIN ENDPOINTS FOR PROPERTY APPROVAL
+// ============================================
 
 // GET /admin/properties/pending - Get all pending properties (Admin only)
 app.get("/admin/properties/pending", authenticate, requireAdmin, async (req, res) => {
@@ -670,20 +1308,20 @@ app.get("/admin/properties/pending", authenticate, requireAdmin, async (req, res
   }
 });
 
-// GET /admin/properties/all - Get all properties (Admin only)
+// GET /admin/properties — Admin: Get all properties with filters
 app.get("/admin/properties/all", authenticate, requireAdmin, async (req, res) => {
   try {
     const db = getDB();
-    const { page = "1", limit = "20", status } = req.query;
+    const { status, page = "1", limit = "20" } = req.query;
     
+    const filter = {};
+    if (status && ["pending", "approved", "rejected"].includes(status)) {
+      filter.approvalStatus = status;
+    }
+
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const limitNum = Math.min(50, Math.max(1, parseInt(limit, 10) || 20));
     const skip = (pageNum - 1) * limitNum;
-
-    const filter = {};
-    if (status && status !== "all") {
-      filter.approvalStatus = status;
-    }
 
     const total = await db.collection("properties").countDocuments(filter);
     const properties = await db.collection("properties")
@@ -709,91 +1347,13 @@ app.get("/admin/properties/all", authenticate, requireAdmin, async (req, res) =>
   }
 });
 
-// PATCH /admin/properties/:id/approve
-app.patch("/admin/properties/:id/approve", authenticate, requireAdmin, async (req, res) => {
-  try {
-    const db = getDB();
-    let objectId;
-
-    try {
-      objectId = new ObjectId(req.params.id);
-    } catch {
-      return res.status(400).json({ success: false, message: "Invalid property ID" });
-    }
-
-    const property = await db.collection("properties").findOne({ _id: objectId });
-    if (!property) {
-      return res.status(404).json({ success: false, message: "Property not found" });
-    }
-
-    await db.collection("properties").updateOne(
-      { _id: objectId },
-      { 
-        $set: { 
-          approvalStatus: "approved",
-          rejectionReason: ""
-        } 
-      }
-    );
-
-    res.json({ 
-      success: true, 
-      message: "Property approved successfully",
-      data: formatProperty({ ...property, approvalStatus: "approved" })
-    });
-  } catch (error) {
-    console.error("PATCH /admin/properties/:id/approve error:", error);
-    res.status(500).json({ success: false, message: "Failed to approve property" });
-  }
-});
-
-// PATCH /admin/properties/:id/reject
-app.patch("/admin/properties/:id/reject", authenticate, requireAdmin, async (req, res) => {
-  try {
-    const db = getDB();
-    let objectId;
-
-    try {
-      objectId = new ObjectId(req.params.id);
-    } catch {
-      return res.status(400).json({ success: false, message: "Invalid property ID" });
-    }
-
-    const { reason } = req.body;
-    if (!reason || typeof reason !== "string" || !reason.trim()) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "Rejection reason is required" 
-      });
-    }
-
-    const property = await db.collection("properties").findOne({ _id: objectId });
-    if (!property) {
-      return res.status(404).json({ success: false, message: "Property not found" });
-    }
-
-    await db.collection("properties").updateOne(
-      { _id: objectId },
-      { 
-        $set: { 
-          approvalStatus: "rejected",
-          rejectionReason: reason.trim()
-        } 
-      }
-    );
-
-    res.json({ 
-      success: true, 
-      message: "Property rejected successfully",
-      data: formatProperty({ ...property, approvalStatus: "rejected", rejectionReason: reason.trim() })
-    });
-  } catch (error) {
-    console.error("PATCH /admin/properties/:id/reject error:", error);
-    res.status(500).json({ success: false, message: "Failed to reject property" });
-  }
-});
-
 // PATCH /admin/properties/:id/status - Change approval status (Admin only)
+// Unified endpoint that replaces the old /approve and /reject endpoints.
+// Admin can move any property to any approvalStatus ("approved" | "pending" | "rejected")
+// regardless of its current status. If a property is un-approved (moved back to
+// "pending" or "rejected"), it automatically stops appearing on GET /properties
+// because that route already filters on approvalStatus === "approved" — no extra
+// code needed here for that behavior.
 app.patch("/admin/properties/:id/status", authenticate, requireAdmin, async (req, res) => {
   try {
     const db = getDB();
@@ -821,8 +1381,9 @@ app.patch("/admin/properties/:id/status", authenticate, requireAdmin, async (req
 
     const updateData = { approvalStatus };
     if (approvalStatus === "rejected") {
-      updateData.rejectionReason = rejectionReason || "No reason provided";
-    } else if (approvalStatus === "approved") {
+      updateData.rejectionReason = (rejectionReason || "").toString().trim() || "No reason provided";
+    } else {
+      // approved or pending: clear any previous rejection reason
       updateData.rejectionReason = "";
     }
 
@@ -843,6 +1404,55 @@ app.patch("/admin/properties/:id/status", authenticate, requireAdmin, async (req
     res.status(500).json({ success: false, message: "Failed to update property status" });
   }
 });
+
+// DELETE /admin/properties/:id — Admin: Delete property + reviews + inquiries
+app.delete("/admin/properties/:id", authenticate, requireAdmin, async (req, res) => {
+  try {
+    const db = getDB();
+    let objectId;
+    try {
+      objectId = new ObjectId(req.params.id);
+    } catch {
+      return res.status(400).json({ success: false, message: "Invalid property ID" });
+    }
+
+    const property = await db.collection("properties").findOne({ _id: objectId });
+    if (!property) {
+      return res.status(404).json({ success: false, message: "Property not found" });
+    }
+
+    await db.collection("properties").deleteOne({ _id: objectId });
+    await db.collection("reviews").deleteMany({ propertyId: objectId });
+    await db.collection("inquiries").deleteMany({ propertyId: objectId });
+
+    res.json({ 
+      success: true, 
+      message: "Property and associated data (reviews, inquiries) deleted by Admin" 
+    });
+  } catch (error) {
+    console.error("DELETE /admin/properties/:id error:", error);
+    res.status(500).json({ success: false, message: "Failed to delete property" });
+  }
+});
+
+// GET /admin/users — Admin: Get all users
+app.get("/admin/users", authenticate, requireAdmin, async (req, res) => {
+  try {
+    const db = getDB();
+    const users = await db.collection("user").find({}, { 
+      projection: { id: 1, name: 1, email: 1, role: 1, createdAt: 1 } 
+    }).toArray();
+    
+    res.json({ success: true, data: users });
+  } catch (error) {
+    console.error("GET /admin/users error:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch users" });
+  }
+});
+
+// ============================================
+// REVIEWS
+// ============================================
 
 // Request body validator for reviews
 function validateReview(body) {
@@ -927,74 +1537,6 @@ app.post("/reviews", authenticate, async (req, res) => {
     res.status(500).json({ success: false, message: "Failed to add review" });
   }
 });
-
-// --- নতুন এন্ডপয়েন্টসমূহ ---
-
-// 1. GET /admin/properties — Admin: সব প্রপার্টি দেখা (Pagination সহ)
-app.get("/admin/properties", authenticate, requireAdmin, async (req, res) => {
-  try {
-    const db = getDB();
-    const { status, page = "1", limit = "20" } = req.query;
-    
-    const filter = {};
-    if (status && ["pending", "approved", "rejected"].includes(status)) {
-      filter.approvalStatus = status;
-    }
-
-    const pageNum = Math.max(1, parseInt(page, 10) || 1);
-    const limitNum = Math.min(50, Math.max(1, parseInt(limit, 10) || 20));
-    const skip = (pageNum - 1) * limitNum;
-
-    const total = await db.collection("properties").countDocuments(filter);
-    const properties = await db.collection("properties")
-      .find(filter)
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limitNum)
-      .toArray();
-
-    res.json({
-      success: true,
-      data: properties.map(formatProperty),
-      pagination: { page: pageNum, limit: limitNum, total, totalPages: Math.ceil(total / limitNum) }
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, message: "Failed to fetch admin properties" });
-  }
-});
-
-// 2. DELETE /admin/properties/:id — Admin: প্রপার্টি + রিভিউ + ইনকয়্যারিস ডিলিট
-app.delete("/admin/properties/:id", authenticate, requireAdmin, async (req, res) => {
-  try {
-    const db = getDB();
-    const objectId = new ObjectId(req.params.id);
-
-    await db.collection("properties").deleteOne({ _id: objectId });
-    await db.collection("reviews").deleteMany({ propertyId: objectId });
-    // যদি ইনকয়্যারিস বা অন্য কিছু থাকে, তবে এখানে ডিলিট করতে পারেন
-    
-    res.json({ success: true, message: "Property and associated data deleted by Admin" });
-  } catch (error) {
-    res.status(500).json({ success: false, message: "Failed to delete property" });
-  }
-});
-
-// 3. GET /admin/users — Admin: সকল ইউজারের তালিকা
-app.get("/admin/users", authenticate, requireAdmin, async (req, res) => {
-  try {
-    const db = getDB();
-    const users = await db.collection("user").find({}, { 
-      projection: { id: 1, name: 1, email: 1, role: 1, createdAt: 1 } 
-    }).toArray();
-    
-    res.json({ success: true, data: users });
-  } catch (error) {
-    res.status(500).json({ success: false, message: "Failed to fetch users" });
-  }
-});
-
-
-
 
 // Health check
 app.get("/", (req, res) => {
