@@ -1,272 +1,116 @@
-# 🏠 StayNest Backend API
+﻿# StayNest Backend API
 
-A robust RESTful API for a rental property management platform, built with **Node.js**, **Express**, and **MongoDB**. Handles property listings, authentication, reviews, and more.
+Express and MongoDB API for the StayNest rental-property platform.
 
-🔗 **Live URL:** [https://staynest-next.vercel.app](https://staynest-next.vercel.app)
+The web application is available at [staynest-next.vercel.app](https://staynest-next.vercel.app). The frontend forwards authenticated API calls to this service through its `/api/backend` proxy.
 
----
+## Features
 
-## ✨ Features
+- Session authentication compatible with Better Auth cookies
+- Property creation, updates, deletion, filtering, and pagination
+- Listing approval workflow for administrators
+- Secure rental confirmation for approved, available listings
+- Renter details and confirmed-rental lookup
+- Owner inquiries, viewing requests, reviews, and analytics
+- Admin property management and platform analytics
 
-- ✅ CRUD operations for property listings
-- ✅ Search & filter by location, price, type, bedrooms, and more
-- ✅ Session-based authentication via **Better Auth**
-- ✅ Review system with automatic rating updates
-- ✅ Owner verification for property modifications
-- ✅ Pagination & sorting for efficient data fetching
-- ✅ CORS support for frontend integration
-- ✅ MongoDB aggregation for real-time property stats
-- ✅ Seed script for test data generation
+## Tech stack
 
----
+- Node.js and Express
+- TypeScript
+- MongoDB Native Driver
+- dotenv and cors
 
-## 🛠️ Tech Stack
+## Quick start
 
-| Technology | Purpose |
-|---|---|
-| Node.js | Runtime environment |
-| Express.js | Web framework |
-| MongoDB | NoSQL database |
-| MongoDB Native Driver | Database connectivity |
-| dotenv | Environment variables |
-| cors | Cross-origin resource sharing |
-
----
-
-## 🚀 Quick Start
+### 1. Install dependencies
 
 ```bash
-# Clone & install
-git clone https://github.com/yourusername/staynest-backend.git
-cd staynest-backend
 npm install
-
-# Set up environment
-cp .env.example .env
-
-# Seed database (optional)
-npm run seed
-
-# Start server
-npm run dev   # development
-npm start     # production
 ```
 
-Server runs at `http://localhost:5000` by default.
+### 2. Configure environment variables
 
-### Environment Variables
+Create a `.env` file:
 
 ```env
-MONGODB_URI=mongodb://localhost:27017/StayNest
+MONGODB_URI=your_mongodb_connection_string
 PORT=5000
 FRONTEND_URL=http://localhost:3000
 ```
 
----
+For deployed environments, set `FRONTEND_URL` to the deployed frontend origin, for example `https://staynest-next.vercel.app`.
 
-## 📡 API Endpoints
-
-### 🏘️ Properties
-
-| Method | Endpoint | Description | Auth |
-|---|---|---|:---:|
-| GET | `/properties` | Get all properties (with filters) | ❌ |
-| GET | `/properties/:id` | Get a single property | ❌ |
-| POST | `/properties` | Create a new property | ✅ |
-| PUT | `/properties/:id` | Update a property | ✅ |
-| DELETE | `/properties/:id` | Delete a property | ✅ |
-
-**Query params for `GET /properties`:** `q`, `type`, `city`, `minPrice`, `maxPrice`, `beds`, `sort` (`newest` / `price-asc` / `price-desc` / `rating`), `page`, `limit`, `featured`, `ownerId`
-
-<details>
-<summary>Response example</summary>
-
-```json
-{
-  "success": true,
-  "message": "Properties fetched successfully",
-  "data": [
-    {
-      "id": "674a00000000000000000001",
-      "title": "Luxury Oceanfront Villa with Private Pool",
-      "rent": 4500,
-      "city": "Miami"
-    }
-  ],
-  "pagination": { "page": 1, "limit": 12, "total": 42, "totalPages": 4 }
-}
-```
-</details>
-
-### ⭐ Reviews
-
-| Method | Endpoint | Description | Auth |
-|---|---|---|:---:|
-| GET | `/reviews/:propertyId` | Get all reviews for a property | ❌ |
-| POST | `/reviews` | Add a review | ✅ |
-
-<details>
-<summary>Request body example</summary>
-
-```json
-{
-  "propertyId": "674a00000000000000000001",
-  "rating": 5,
-  "comment": "Amazing place to stay!"
-}
-```
-</details>
-
----
-
-## 🔐 Authentication
-
-Session-based auth via **Better Auth**, using either:
-- `Authorization: Bearer <session_token>` header, or
-- `better-auth.session_token` cookie
-
-All `POST`, `PUT`, and `DELETE` routes require authentication. Users can only modify properties they own; any authenticated user can post reviews.
-
----
-
-## 📊 Data Models
-
-<details>
-<summary><strong>User</strong></summary>
-
-```javascript
-{
-  _id: ObjectId,
-  name: String,
-  email: String,
-  image: String,
-  phone: String,
-  role: String // "host" | "user"
-}
-```
-</details>
-
-<details>
-<summary><strong>Property</strong></summary>
-
-```javascript
-{
-  _id: ObjectId,
-  title: String,
-  shortDescription: String,
-  fullDescription: String,
-  rent: Number,
-  type: String, // "apartment" | "house" | "villa" | "studio" | "loft" | "cabin"
-  bedrooms: Number,
-  bathrooms: Number,
-  area: Number,
-  city: String,
-  address: String,
-  images: [String],
-  amenities: [String],
-  rating: Number, // 0-5
-  reviewCount: Number,
-  ownerId: String,
-  ownerName: String,
-  status: String, // "available" | "rented" | "pending"
-  featured: Boolean,
-  createdAt: String
-}
-```
-</details>
-
-<details>
-<summary><strong>Review</strong></summary>
-
-```javascript
-{
-  _id: ObjectId,
-  propertyId: ObjectId,
-  userName: String,
-  rating: Number, // 1-5
-  comment: String,
-  date: String,
-  createdAt: String
-}
-```
-</details>
-
----
-
-## 🛡️ Error Handling
-
-```json
-{ "success": false, "message": "Error description" }
-```
-
-| Code | Meaning |
-|---|---|
-| 200 | Success |
-| 201 | Created |
-| 400 | Bad Request |
-| 401 | Unauthorized |
-| 403 | Forbidden |
-| 404 | Not Found |
-| 500 | Server Error |
-
----
-
-## 🧪 Testing
+### 3. Run the API
 
 ```bash
-node check_db.js                 # test DB connection
-curl http://localhost:5000/properties   # get all properties
+npm run dev      # Development with ts-node
+npm run build    # Compile TypeScript to dist/
+npm start        # Start compiled production server
 ```
 
----
+The local API runs on `http://localhost:5000`.
 
-## 🚢 Deployment
+## Core endpoints
 
-**Render:** create a Web Service → connect GitHub repo → set `MONGODB_URI`, `PORT`, `FRONTEND_URL` → deploy.
+| Method | Endpoint | Description | Auth |
+| --- | --- | --- | --- |
+| GET | `/properties` | Browse and filter approved properties | No |
+| GET | `/properties/:id` | Get property details | No* |
+| POST | `/properties` | Create a property listing | Yes |
+| PUT | `/properties/:id` | Update an owned listing | Yes |
+| DELETE | `/properties/:id` | Delete an owned listing | Yes |
+| POST | `/properties/:id/rent` | Confirm an available property rental | Yes |
+| GET | `/my-properties` | Get the signed-in owner's listings | Yes |
+| GET | `/my-rentals` | Get the signed-in renter's confirmed properties | Yes |
+| POST | `/inquiries` | Send an owner message or viewing request | Yes |
+| GET | `/inquiries/received` | Get owner inquiries | Yes |
+| GET | `/owner/analytics` | Get owner dashboard data | Yes |
+| GET | `/admin/analytics` | Get platform dashboard data | Admin |
 
-**Docker:**
-```dockerfile
-FROM node:16-alpine
-WORKDIR /app
-COPY package*.json ./
-RUN npm install
-COPY . .
-EXPOSE 5000
-CMD ["node", "server.js"]
+`*` Unapproved listings are visible only to their owner or an admin.
+
+### Property query parameters
+
+`q`, `type`, `city`, `minPrice`, `maxPrice`, `beds`, `sort`, `page`, `limit`, `featured`, and `ownerId` are supported by `GET /properties`.
+
+## Rental safety
+
+`POST /properties/:id/rent` verifies that the property is approved and available, blocks owners from renting their own listing, and performs an availability-guarded update. This prevents two renters from confirming the same property.
+
+## Authentication
+
+Authenticated requests accept either:
+
+- `better-auth.session_token` cookie
+- `Authorization: Bearer <session_token>` header
+
+The production frontend proxy forwards browser sessions to this API automatically.
+
+## Project structure
+
+```text
+Backend/
+  server.ts       # Express routes and application bootstrap
+  db.ts           # MongoDB connection helpers
+  types.ts        # API, database, and request types
+  package.json    # Scripts and dependencies
+  tsconfig.json   # TypeScript configuration
 ```
 
----
+## Deployment checklist
 
-## 📁 Project Structure
+1. Deploy this service to a Node-compatible host.
+2. Set `MONGODB_URI`, `PORT`, and `FRONTEND_URL`.
+3. Set the frontend's `NEXT_PUBLIC_API_URL` to this service URL.
+4. Confirm CORS permits the frontend origin.
+5. Run `npm run build` before starting production.
 
+## Error format
+
+```json
+{
+  "success": false,
+  "message": "Description of the error"
+}
 ```
-staynest-backend/
-├── server.js       # App entry point
-├── db.js           # Database connection
-├── seed.js         # Seed script
-├── check_db.js     # DB connection test
-├── package.json
-└── .env
-```
-
----
-
-## 🤝 Contributing
-
-1. Fork the repo
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit & push your changes
-4. Open a Pull Request
-
----
-
-## 📝 License
-ISC License
-
-## 📬 Contact
-- Email: support@staynest.com
-- GitHub: github.com/yourusername/staynest-backend
-
----
-
-<p align="center">Happy Coding! 🎉</p>
