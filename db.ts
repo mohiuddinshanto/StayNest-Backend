@@ -1,12 +1,14 @@
-const { MongoClient } = require("mongodb");
-require("dotenv").config();
+import { MongoClient, Db } from "mongodb";
+import dotenv from "dotenv";
 
-const uri = process.env.MONGODB_URI;
+dotenv.config();
+
+const uri = process.env.MONGODB_URI as string;
 const client = new MongoClient(uri);
 
-let db;
+let db: Db | null = null;
 
-async function connectDB() {
+export async function connectDB(): Promise<Db> {
   if (db) return db;
   await client.connect();
   db = client.db("StayNest");
@@ -14,9 +16,9 @@ async function connectDB() {
   return db;
 }
 
-function getDB() {
+export function getDB(): Db {
   if (!db) throw new Error("Database not connected. Call connectDB() first.");
   return db;
 }
 
-module.exports = { connectDB, getDB, client };
+export { client };
